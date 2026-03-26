@@ -1,4 +1,6 @@
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
@@ -8,7 +10,7 @@
   --bg: #1c1c1e;
   --bg-card: #2c2c2e;
   --bg-hover: #3a3a3c;
-  --border: rgba(255,255,255,0.08);
+  --border: rgba(255, 255, 255, 0.08);
   --text: #f2f2f7;
   --text-secondary: #8e8e93;
   --accent: #0a84ff;
@@ -18,7 +20,8 @@
   --radius-sm: 8px;
 }
 
-html, body {
+html,
+body {
   width: 100%;
   height: 100%;
   background-color: #1c1c1e;
@@ -232,7 +235,7 @@ html, body {
   height: 20px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   transition: transform 0.2s;
   display: block;
 }
@@ -288,7 +291,7 @@ html, body {
 }
 
 .app-list::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.12);
+  background: rgba(255, 255, 255, 0.12);
   border-radius: 4px;
 }
 
@@ -353,7 +356,7 @@ html, body {
 /* ---- Barlo Bar ---- */
 
 .barlo-bar {
-  width: 100%;
+  width: 50%;
   height: 28px;
   background: rgba(28, 28, 30, 0.85);
   backdrop-filter: blur(20px);
@@ -362,14 +365,14 @@ html, body {
   align-items: center;
   gap: 8px;
   padding: 0 12px;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .barlo-bar-label {
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 10px;
   font-weight: 600;
-  color: rgba(255,255,255,0.35);
+  color: rgba(255, 255, 255, 0.35);
   letter-spacing: 0.5px;
   text-transform: uppercase;
   margin-right: 4px;
@@ -385,17 +388,17 @@ html, body {
   width: 22px;
   height: 22px;
   border-radius: 4px;
-  background: rgba(255,255,255,0.08);
+  background: rgba(255, 255, 255, 0.08);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 11px;
   font-weight: 600;
-  color: rgba(255,255,255,0.7);
+  color: rgba(255, 255, 255, 0.7);
   cursor: pointer;
   transition: background 0.15s;
 }
 
 .barlo-bar-item:hover {
-  background: rgba(255,255,255,0.16);
+  background: rgba(255, 255, 255, 0.16);
 }

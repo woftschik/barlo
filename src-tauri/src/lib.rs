@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    Manager, WebviewUrl, WebviewWindowBuilder,
+    Manager,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -261,11 +261,23 @@ async fn show_settings(app: tauri::AppHandle) {
 async fn toggle_barlo_bar(visible: bool, app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("barlo-bar") {
         if visible {
+            dock_barlo_bar(&window);
             let _ = window.show();
-            let _ = window.set_focus();
         } else {
             let _ = window.hide();
         }
+    }
+}
+
+/// Pins the Barlo Bar window directly below the menu bar, right-aligned at 50% width.
+fn dock_barlo_bar(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        let info = macos::get_notch_info();
+        let bar_width = info.screen_width / 2.0;
+        let bar_x = info.screen_width - bar_width;
+        let _ = window.set_size(tauri::LogicalSize::new(bar_width, 40.0));
+        let _ = window.set_position(tauri::LogicalPosition::new(bar_x, info.menu_bar_height));
     }
 }
 
@@ -275,7 +287,10 @@ async fn position_barlo_bar(app: tauri::AppHandle) {
     {
         if let Some(window) = app.get_webview_window("barlo-bar") {
             let notch_info = macos::get_notch_info();
-            let _ = window.set_position(tauri::PhysicalPosition::new(0i32, notch_info.menu_bar_height as i32));
+            let _ = window.set_position(tauri::PhysicalPosition::new(
+                0i32,
+                notch_info.menu_bar_height as i32,
+            ));
         }
     }
 }
@@ -291,28 +306,11 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
-            // Create the Barlo Bar window programmatically so we control all options precisely
-            #[cfg(target_os = "macos")]
-            let menu_bar_height = macos::get_notch_info().menu_bar_height;
-            #[cfg(not(target_os = "macos"))]
-            let menu_bar_height = 24.0f64;
-
-            let _barlo_bar = WebviewWindowBuilder::new(
-                app,
-                "barlo-bar",
-                WebviewUrl::App("index.html".into()),
-            )
-            .title("Barlo Bar")
-            .inner_size(2560.0, 28.0)
-            // Use logical position: directly below the menu bar
-            .position(0.0, menu_bar_height)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .resizable(false)
-            .visible(false)
-            .skip_taskbar(true)
-            .build()?;
+            // barlo-bar is defined in tauri.conf.json with transparent: true.
+            // Position it correctly based on the current screen layout.
+            if let Some(barlo_bar) = app.get_webview_window("barlo-bar") {
+                dock_barlo_bar(&barlo_bar);
+            }
 
             // Build tray menu
             let settings_item =
@@ -353,6 +351,7 @@ pub fn run() {
                             if visible {
                                 let _ = window.hide();
                             } else {
+                                dock_barlo_bar(&window);
                                 let _ = window.show();
                             }
                         }

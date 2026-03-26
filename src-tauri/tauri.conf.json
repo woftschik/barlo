@@ -25,6 +25,21 @@
         "resizable": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
+      },
+      {
+        "label": "barlo-bar",
+        "title": "Barlo Bar",
+        "width": 960,
+        "height": 32,
+        "x": 0,
+        "y": 0,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "hiddenTitle": true
       }
     ],
     "security": {

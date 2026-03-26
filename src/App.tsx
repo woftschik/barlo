@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { BarloBar } from "./BarloBar";
 import "./App.css";
 
 function getWindowLabel(): string {
@@ -15,28 +16,6 @@ interface StatusBarApp {
   pid: number;
   name: string;
   bundle_id: string;
-}
-
-// ---- Barlo Bar View ----
-function BarloBarView() {
-  const [apps, setApps] = useState<StatusBarApp[]>([]);
-
-  useEffect(() => {
-    invoke<StatusBarApp[]>("get_status_bar_apps").then(setApps).catch(() => {});
-  }, []);
-
-  return (
-    <div className="barlo-bar">
-      <div className="barlo-bar-label">Barlo Bar</div>
-      <div className="barlo-bar-items">
-        {apps.slice(0, 8).map((app) => (
-          <div key={app.pid} className="barlo-bar-item" title={app.name}>
-            {app.name.charAt(0)}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
 }
 
 // ---- Settings View ----
@@ -183,7 +162,7 @@ function App() {
   const windowLabel = getWindowLabel();
 
   if (windowLabel === "barlo-bar") {
-    return <BarloBarView />;
+    return <BarloBar />;
   }
 
   return <SettingsView />;
