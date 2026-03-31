@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    Manager,
+    Emitter, Manager,
 };
 
 // ── Global state ───────────────────────────────────────────────────────────────
@@ -25,6 +26,8 @@ static WALLPAPER_OBSERVER_PTR: AtomicUsize = AtomicUsize::new(0);
 static REFRESH_TIMER_PTR: AtomicUsize = AtomicUsize::new(0);
 static LAST_WALLPAPER_URL_PTR: AtomicUsize = AtomicUsize::new(0); // retained NSString*
 
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -42,6 +45,13 @@ pub struct StatusBarApp {
     pub pid: i32,
     pub name: String,
     pub bundle_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StatusItemInfo {
+    pub icon_base64: String,
+    pub click_x: f64,
+    pub click_y: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -121,6 +131,15 @@ mod macos {
         ) -> *mut std::ffi::c_void; // CGImageRef
 
         fn CGImageRelease(image: *mut std::ffi::c_void);
+
+        fn CGEventCreateMouseEvent(
+            source: *const std::ffi::c_void,
+            mouse_type: u32,
+            cursor_position: NSPoint,
+            mouse_button: u32,
+        ) -> *mut std::ffi::c_void;
+        fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+        fn CFRelease(cf: *mut std::ffi::c_void);
 
         /// Listet alle On-Screen-Fenster als CFArrayRef von CFDictionaryRef auf.
         /// option = 1 (kCGWindowListOptionOnScreenOnly)
@@ -363,7 +382,7 @@ mod macos {
         // Level 26 = über allen Status-Items (Level 25)
         let _: () = msg_send![win, setLevel: 26i64];
         let _: () = msg_send![win, setOpaque: objc::runtime::YES];
-        let _: () = msg_send![win, setIgnoresMouseEvents: objc::runtime::YES];
+        let _: () = msg_send![win, setIgnoresMouseEvents: objc::runtime::NO];
         // Auf allen Spaces sichtbar, kein Cycling
         let _: () = msg_send![win, setCollectionBehavior: 4105u64];
 
@@ -469,6 +488,50 @@ mod macos {
 
         // kCGWindowListOptionOnScreenBelowWindow = (1<<2) = 4, kCGWindowImageDefault = 0
         CGWindowListCreateImage(cg_rect, 4u32, window_num_u32, 0u32)
+    }
+
+    /// Macht einen Screenshot der versteckten Zone MIT den Icons (vor dem Verstecken).
+    /// Gibt das Bild als Base64-PNG zurück, damit die Barlo Bar es anzeigen kann.
+    unsafe fn capture_icon_strip_base64() -> Option<String> {
+        let (left, right, y, h) = overlay_bounds()?;
+        let screen: *mut Object = msg_send![class!(NSScreen), mainScreen];
+        let scr: NSRect = msg_send![screen, frame];
+        // Cocoa → CG Koordinaten
+        let cg_rect = NSRect {
+            origin: NSPoint {
+                x: left,
+                y: scr.size.height - y - h,
+            },
+            size: NSSize {
+                width: right - left,
+                height: h,
+            },
+        };
+        // kCGWindowListOptionOnScreenOnly = 1, kCGNullWindowID = 0 → alles sichtbare
+        let cg_image = CGWindowListCreateImage(cg_rect, 1u32, 0u32, 0u32);
+        if cg_image.is_null() {
+            return None;
+        }
+        let logical_size = NSSize {
+            width: right - left,
+            height: h,
+        };
+        let rep: *mut Object = msg_send![class!(NSBitmapImageRep), alloc];
+        let rep: *mut Object = msg_send![rep, initWithCGImage: cg_image];
+        let _: () = msg_send![rep, setSize: logical_size];
+        CGImageRelease(cg_image);
+        // NSBitmapImageFileTypePNG = 4
+        let png_data: *mut Object = msg_send![rep,
+            representationUsingType: 4u64
+            properties: std::ptr::null_mut::<Object>()
+        ];
+        let _: () = msg_send![rep, release];
+        if png_data.is_null() {
+            return None;
+        }
+        // NSData hat eingebautes Base64 — kein externer Crate nötig
+        let b64: *mut Object = msg_send![png_data, base64EncodedStringWithOptions: 0u64];
+        ns_str(b64)
     }
 
     // ── Overlay initialisieren ─────────────────────────────────────────────
@@ -639,10 +702,17 @@ mod macos {
                 return;
             }
             let button: *mut Object = msg_send![item, button];
-            let empty: *mut Object = msg_send![class!(NSString),
-                stringWithUTF8String: b"\0".as_ptr() as *const i8];
-            let _: () = msg_send![button, setTitle: empty];
+            // U+2502 BOX DRAWINGS LIGHT VERTICAL = "│" als visueller Trenner
+            let title: *mut Object = msg_send![class!(NSString),
+                stringWithUTF8String: b"\xe2\x94\x82\0".as_ptr() as *const i8];
+            let _: () = msg_send![button, setTitle: title];
             let _: () = msg_send![button, setBordered: objc::runtime::NO];
+            // Kleiner Font damit "|" schlanker wirkt
+            let font: *mut Object = msg_send![class!(NSFont),
+                systemFontOfSize: 10.0f64];
+            if !font.is_null() {
+                let _: () = msg_send![button, setFont: font];
+            }
             let _: () = msg_send![item, retain];
             ANCHOR_ITEM_PTR.store(item as usize, Ordering::SeqCst);
             eprintln!("[Barlo] Anchor-Item erstellt");
@@ -652,21 +722,34 @@ mod macos {
     // ── Button-Titel-Feedback ──────────────────────────────────────────────
 
     fn update_dots_title(hidden: bool) {
-        let ptr = DOTS_ITEM_PTR.load(Ordering::SeqCst);
-        if ptr == 0 {
-            return;
-        }
         unsafe {
-            let item = ptr as *mut Object;
-            let button: *mut Object = msg_send![item, button];
-            let bytes: &[u8] = if hidden {
-                b"\xe2\x97\x8f\0"
-            } else {
-                b"\xe2\x8b\xaf\0"
-            };
-            let title: *mut Object = msg_send![class!(NSString),
-                stringWithUTF8String: bytes.as_ptr() as *const i8];
-            let _: () = msg_send![button, setTitle: title];
+            // Dots-Button: ⋯ wenn sichtbar, │ wenn versteckt
+            let dots_ptr = DOTS_ITEM_PTR.load(Ordering::SeqCst);
+            if dots_ptr != 0 {
+                let item = dots_ptr as *mut Object;
+                let button: *mut Object = msg_send![item, button];
+                // ⋯ = \xe2\x8b\xaf, │ = \xe2\x94\x82
+                let bytes: &[u8] = if hidden {
+                    b"\xe2\x94\x82\0"
+                } else {
+                    b"\xe2\x8b\xaf\0"
+                };
+                let title: *mut Object = msg_send![class!(NSString),
+                    stringWithUTF8String: bytes.as_ptr() as *const i8];
+                let _: () = msg_send![button, setTitle: title];
+            }
+            // Anker: ausblenden wenn Icons versteckt, einblenden wenn sichtbar
+            let anchor_ptr = ANCHOR_ITEM_PTR.load(Ordering::SeqCst);
+            if anchor_ptr != 0 {
+                let anchor = anchor_ptr as *mut Object;
+                let anchor_button: *mut Object = msg_send![anchor, button];
+                let hidden_val = if hidden {
+                    objc::runtime::YES
+                } else {
+                    objc::runtime::NO
+                };
+                let _: () = msg_send![anchor_button, setHidden: hidden_val];
+            }
         }
     }
 
@@ -717,6 +800,9 @@ mod macos {
             }
             ICONS_HIDDEN.store(false, Ordering::SeqCst);
             update_dots_title(false);
+            if let Some(h) = APP_HANDLE.get() {
+                let _ = h.emit("barlo-icons-state", serde_json::json!({ "hidden": false }));
+            }
         } else {
             show_overlay();
             unsafe {
@@ -724,6 +810,9 @@ mod macos {
             }
             ICONS_HIDDEN.store(true, Ordering::SeqCst);
             update_dots_title(true);
+            if let Some(h) = APP_HANDLE.get() {
+                let _ = h.emit("barlo-icons-state", serde_json::json!({ "hidden": true }));
+            }
         }
     }
 
@@ -745,7 +834,18 @@ mod macos {
                             show_overlay();
                         }
                     }
+                    extern "C" fn restore_overlay(_this: &Object, _cmd: Sel) {
+                        if ICONS_HIDDEN.load(Ordering::SeqCst) {
+                            unsafe {
+                                show_overlay();
+                            }
+                        }
+                    }
                     decl.add_method(sel!(timerTick), timer_tick as extern "C" fn(&Object, Sel));
+                    decl.add_method(
+                        sel!(restoreOverlay),
+                        restore_overlay as extern "C" fn(&Object, Sel),
+                    );
                     decl.register();
                 }
             }
@@ -791,6 +891,188 @@ mod macos {
             DOTS_ITEM_PTR.store(item as usize, Ordering::SeqCst);
             DOTS_HANDLER_PTR.store(handler as usize, Ordering::SeqCst);
             eprintln!("[Barlo] Dots-Item erstellt");
+        }
+    }
+
+    // ── Hidden status item enumeration ────────────────────────────────────
+
+    pub unsafe fn collect_hidden_status_items() -> Vec<StatusItemInfo> {
+        let (left_x, right_x, _, _) = match overlay_bounds() {
+            Some(b) => b,
+            None => return vec![],
+        };
+        let arr = CGWindowListCopyWindowInfo(1u32, 0u32) as *mut Object;
+        if arr.is_null() {
+            return vec![];
+        }
+        let count: usize = msg_send![arr, count];
+
+        let key_layer = nsstring_static("kCGWindowLayer");
+        let key_num = nsstring_static("kCGWindowNumber");
+        let key_pid = nsstring_static("kCGWindowOwnerPID");
+        let key_bounds = nsstring_static("kCGWindowBounds");
+        let key_x = nsstring_static("X");
+        let key_y = nsstring_static("Y");
+        let key_w = nsstring_static("Width");
+        let key_h = nsstring_static("Height");
+
+        let our_pid = std::process::id() as i32;
+        let mut result = Vec::new();
+
+        for i in 0..count {
+            let info: *mut Object = msg_send![arr, objectAtIndex: i];
+
+            // Only level-25 windows (status bar level)
+            let layer_obj: *mut Object = msg_send![info, objectForKey: key_layer];
+            if layer_obj.is_null() {
+                continue;
+            }
+            let layer: i32 = msg_send![layer_obj, intValue];
+            if layer != 25 {
+                continue;
+            }
+
+            // Skip our own windows
+            let pid_obj: *mut Object = msg_send![info, objectForKey: key_pid];
+            if !pid_obj.is_null() {
+                let pid: i32 = msg_send![pid_obj, intValue];
+                if pid == our_pid {
+                    continue;
+                }
+            }
+
+            // Get bounds
+            let bounds_dict: *mut Object = msg_send![info, objectForKey: key_bounds];
+            if bounds_dict.is_null() {
+                continue;
+            }
+
+            let x_obj: *mut Object = msg_send![bounds_dict, objectForKey: key_x];
+            let y_obj: *mut Object = msg_send![bounds_dict, objectForKey: key_y];
+            let w_obj: *mut Object = msg_send![bounds_dict, objectForKey: key_w];
+            let h_obj: *mut Object = msg_send![bounds_dict, objectForKey: key_h];
+            if x_obj.is_null() || w_obj.is_null() {
+                continue;
+            }
+
+            let win_x: f64 = msg_send![x_obj, doubleValue];
+            let win_y: f64 = if y_obj.is_null() {
+                0.0
+            } else {
+                msg_send![y_obj, doubleValue]
+            };
+            let win_w: f64 = msg_send![w_obj, doubleValue];
+            let win_h: f64 = if h_obj.is_null() {
+                22.0
+            } else {
+                msg_send![h_obj, doubleValue]
+            };
+
+            // Filter: center-x must be in the hidden zone
+            let center_x = win_x + win_w / 2.0;
+            if center_x < left_x || center_x > right_x {
+                continue;
+            }
+
+            // Skip tiny windows (width < 5)
+            if win_w < 5.0 {
+                continue;
+            }
+
+            // Click position in CG coords (Y=0 at top)
+            let click_x = win_x + win_w / 2.0;
+            let click_y = win_y + win_h / 2.0;
+
+            // Screenshot of this specific window
+            let num_obj: *mut Object = msg_send![info, objectForKey: key_num];
+            if num_obj.is_null() {
+                continue;
+            }
+            let wid: u32 = msg_send![num_obj, unsignedIntValue];
+
+            let win_rect = NSRect {
+                origin: NSPoint { x: win_x, y: win_y },
+                size: NSSize {
+                    width: win_w,
+                    height: win_h,
+                },
+            };
+            // kCGWindowListOptionIncludingWindow = 8
+            let cg_image = CGWindowListCreateImage(win_rect, 8u32, wid, 0u32);
+            if cg_image.is_null() {
+                continue;
+            }
+
+            let logical_size = NSSize {
+                width: win_w,
+                height: win_h,
+            };
+            let rep: *mut Object = msg_send![class!(NSBitmapImageRep), alloc];
+            let rep: *mut Object = msg_send![rep, initWithCGImage: cg_image];
+            let _: () = msg_send![rep, setSize: logical_size];
+            CGImageRelease(cg_image);
+
+            let png_data: *mut Object = msg_send![rep,
+                representationUsingType: 4u64
+                properties: std::ptr::null_mut::<Object>()
+            ];
+            let _: () = msg_send![rep, release];
+            if png_data.is_null() {
+                continue;
+            }
+
+            let b64: *mut Object = msg_send![png_data, base64EncodedStringWithOptions: 0u64];
+            let icon_base64 = ns_str(b64).unwrap_or_default();
+            if icon_base64.is_empty() {
+                continue;
+            }
+
+            result.push(StatusItemInfo {
+                icon_base64,
+                click_x,
+                click_y,
+            });
+        }
+
+        let _: () = msg_send![arr, release];
+        result
+    }
+
+    unsafe fn post_click_at_cg(x: f64, y: f64) {
+        let pos = NSPoint { x, y };
+        // kCGEventLeftMouseDown=1, kCGEventLeftMouseUp=2, kCGHIDEventTap=0
+        let down = CGEventCreateMouseEvent(std::ptr::null(), 1u32, pos, 0u32);
+        if !down.is_null() {
+            CGEventPost(0u32, down);
+            CFRelease(down);
+        }
+        let up = CGEventCreateMouseEvent(std::ptr::null(), 2u32, pos, 0u32);
+        if !up.is_null() {
+            CGEventPost(0u32, up);
+            CFRelease(up);
+        }
+    }
+
+    /// Overlay kurz ausblenden → Click an Original-Position senden →
+    /// nach 1.5s Overlay wieder einblenden (genug Zeit fürs Menü).
+    pub fn activate_item(click_x: f64, click_y: f64) {
+        if !ICONS_HIDDEN.load(Ordering::SeqCst) {
+            return;
+        }
+        unsafe {
+            hide_overlay();
+            // Kurz warten damit das Overlay wirklich weg ist, dann klicken
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            post_click_at_cg(click_x, click_y);
+            // Nach 1.5s Overlay wieder zeigen (Menü sollte bis dahin offen/genutzt sein)
+            let obs = WALLPAPER_OBSERVER_PTR.load(Ordering::SeqCst);
+            if obs != 0 {
+                let null = std::ptr::null_mut::<Object>();
+                let _: () = msg_send![obs as *mut Object,
+                    performSelector: sel!(restoreOverlay)
+                    withObject: null
+                    afterDelay: 1.5f64];
+            }
         }
     }
 }
@@ -892,10 +1174,9 @@ fn dock_barlo_bar(window: &tauri::WebviewWindow) {
     #[cfg(target_os = "macos")]
     {
         let info = macos::get_notch_info();
-        let bar_width = info.screen_width / 2.0;
-        let bar_x = info.screen_width - bar_width;
-        let _ = window.set_size(tauri::LogicalSize::new(bar_width, 40.0));
-        let _ = window.set_position(tauri::LogicalPosition::new(bar_x, info.menu_bar_height));
+        // Fenster weit off-screen starten — resize_barlo_bar setzt die finale Position
+        let _ = window.set_size(tauri::LogicalSize::new(100.0, 40.0));
+        let _ = window.set_position(tauri::LogicalPosition::new(-9999.0, info.menu_bar_height));
     }
 }
 
@@ -913,11 +1194,52 @@ async fn position_barlo_bar(app: tauri::AppHandle) {
     }
 }
 
+#[tauri::command]
+fn get_hidden_status_items() -> Vec<StatusItemInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe { macos::collect_hidden_status_items() }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec![]
+    }
+}
+
+#[tauri::command]
+async fn resize_barlo_bar(content_width: f64, app: tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    if let Some(w) = app.get_webview_window("barlo-bar") {
+        let info = macos::get_notch_info();
+        // content_width = tatsächliche Icons-Breite aus DOM
+        // + 32px für CSS padding (2×16px)
+        let bar_width = (content_width + 32.0).max(32.0);
+        let bar_x = info.screen_width - 150.0 - bar_width;
+        let _ = w.set_size(tauri::LogicalSize::new(bar_width, 40.0));
+        let _ = w.set_position(tauri::LogicalPosition::new(bar_x, info.menu_bar_height));
+    }
+}
+
+#[tauri::command]
+fn activate_status_item(click_x: f64, click_y: f64) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        macos::activate_item(click_x, click_y);
+    }
+}
+
+#[tauri::command]
+fn toggle_icon_hiding_cmd() {
+    #[cfg(target_os = "macos")]
+    macos::toggle_icon_hiding();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            APP_HANDLE.set(app.handle().clone()).ok();
             #[cfg(target_os = "macos")]
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -931,6 +1253,15 @@ pub fn run() {
 
             if let Some(barlo_bar) = app.get_webview_window("barlo-bar") {
                 dock_barlo_bar(&barlo_bar);
+                #[cfg(target_os = "macos")]
+                unsafe {
+                    use objc::runtime::Object;
+                    use objc::{msg_send, sel, sel_impl};
+                    if let Ok(ptr) = barlo_bar.ns_window() {
+                        let ns_win = ptr as *mut Object;
+                        let _: () = msg_send![ns_win, setHasShadow: objc::runtime::NO];
+                    }
+                }
             }
 
             let settings_item =
@@ -987,6 +1318,10 @@ pub fn run() {
             show_settings,
             toggle_barlo_bar,
             position_barlo_bar,
+            get_hidden_status_items,
+            resize_barlo_bar,
+            activate_status_item,
+            toggle_icon_hiding_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

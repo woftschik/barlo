@@ -13,20 +13,34 @@ body,
   height: 35px;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 10px;
+  justify-content: flex-end;
+  padding-right: 16px;
+  padding-left: 16px;
   background: rgba(255, 255, 255, 0.261);
   overflow: hidden;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
+.bar.empty {
+  background: transparent;
+  border-color: transparent;
+}
+
+.bar-icons {
+  display: flex;
+  align-items: center;
+}
+
 .bar-item {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 0px;
+  border: none;
+  background: transparent;
   border-radius: 5px;
   cursor: pointer;
   transition: background 0.12s;
@@ -34,14 +48,12 @@ body,
 }
 
 .bar-item:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.15);
 }
 
-.bar-item-label {
-  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-  font-size: 12px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.75);
-  line-height: 1;
-  user-select: none;
+.item-icon {
+  height: 32px;
+  width: auto;
+  display: block;
+  image-rendering: -webkit-optimize-contrast;
 }
