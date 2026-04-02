@@ -1,16 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { BarloBar } from "./BarloBar";
 import "./App.css";
-
-function getWindowLabel(): string {
-  try {
-    return getCurrentWebviewWindow().label;
-  } catch {
-    return "settings";
-  }
-}
 
 interface StatusBarApp {
   pid: number;
@@ -22,7 +12,6 @@ interface StatusBarApp {
 function SettingsView() {
   const [apps, setApps] = useState<StatusBarApp[]>([]);
   const [hasAccessibility, setHasAccessibility] = useState(false);
-  const [barloBarVisible, setBarloBarVisible] = useState(false);
   const [hiddenPids, setHiddenPids] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
 
@@ -43,12 +32,6 @@ function SettingsView() {
   useEffect(() => {
     refresh();
   }, []);
-
-  const handleToggleBarloBar = async () => {
-    const next = !barloBarVisible;
-    await invoke("toggle_barlo_bar", { visible: next });
-    setBarloBarVisible(next);
-  };
 
   const handleToggleApp = (pid: number) => {
     setHiddenPids((prev: Set<number>) => {
@@ -73,23 +56,6 @@ function SettingsView() {
           <p className="subtitle">Menu Bar Manager</p>
         </div>
       </div>
-
-      {/* Barlo Bar */}
-      <section className="card">
-        <h2>Barlo Bar</h2>
-        <p className="description">
-          Eine zusätzliche Leiste direkt unter der Menüleiste, in der versteckte Icons angezeigt werden.
-        </p>
-        <div className="toggle-row">
-          <span>Barlo Bar anzeigen</span>
-          <button
-            className={`toggle ${barloBarVisible ? "toggle-on" : ""}`}
-            onClick={handleToggleBarloBar}
-          >
-            <span className="toggle-thumb" />
-          </button>
-        </div>
-      </section>
 
       {/* Accessibility */}
       <section className="card">
@@ -159,12 +125,6 @@ function SettingsView() {
 
 // ---- Root ----
 function App() {
-  const windowLabel = getWindowLabel();
-
-  if (windowLabel === "barlo-bar") {
-    return <BarloBar />;
-  }
-
   return <SettingsView />;
 }
 
