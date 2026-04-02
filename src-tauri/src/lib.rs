@@ -11,7 +11,6 @@ use tauri::{
 static ICONS_HIDDEN: AtomicBool = AtomicBool::new(false);
 static DOTS_ITEM_PTR: AtomicUsize = AtomicUsize::new(0);
 static DOTS_HANDLER_PTR: AtomicUsize = AtomicUsize::new(0);
-static ANCHOR_ITEM_PTR: AtomicUsize = AtomicUsize::new(0);
 
 // Strategie A (älteres macOS): View direkt in _statusBarWindow injizieren
 static SB_WIN_PTR: AtomicUsize = AtomicUsize::new(0);
@@ -246,27 +245,52 @@ mod macos {
     /// Gibt (left_screen, right_screen, y_screen, height) in Cocoa-Koordinaten zurück.
     unsafe fn overlay_bounds() -> Option<(f64, f64, f64, f64)> {
         let dots_frame = status_item_frame(DOTS_ITEM_PTR.load(Ordering::SeqCst))?;
-        let anchor_frame = status_item_frame(ANCHOR_ITEM_PTR.load(Ordering::SeqCst));
-
         let right_x = dots_frame.origin.x;
-        let left_x = match anchor_frame {
-            Some(f) => f.origin.x + f.size.width,
-            None => {
-                let screen: *mut Object = msg_send![class!(NSScreen), mainScreen];
-                let aux: NSRect = msg_send![screen, auxiliaryTopRightArea];
-                if aux.size.width > 0.0 {
-                    aux.origin.x
-                } else {
-                    return None;
+
+        // left_x = linkeste x-Position aller fremden Level-25-Fenster links vom Dots-Icon
+        let our_pid = std::process::id() as i32;
+        let arr = CGWindowListCopyWindowInfo(1u32, 0u32) as *mut Object;
+        let mut left_x: f64 = right_x; // Fallback: kein Icon links vom Dots
+
+        if !arr.is_null() {
+            let count: usize = msg_send![arr, count];
+            let key_layer = nsstring_static("kCGWindowLayer");
+            let key_pid   = nsstring_static("kCGWindowOwnerPID");
+            let key_bounds = nsstring_static("kCGWindowBounds");
+            let key_x = nsstring_static("X");
+            let key_w = nsstring_static("Width");
+
+            for i in 0..count {
+                let info: *mut Object = msg_send![arr, objectAtIndex: i];
+                let layer_obj: *mut Object = msg_send![info, objectForKey: key_layer];
+                if layer_obj.is_null() { continue; }
+                let layer: i32 = msg_send![layer_obj, intValue];
+                if layer != 25 { continue; }
+
+                let pid_obj: *mut Object = msg_send![info, objectForKey: key_pid];
+                if !pid_obj.is_null() {
+                    let pid: i32 = msg_send![pid_obj, intValue];
+                    if pid == our_pid { continue; }
+                }
+
+                let bounds: *mut Object = msg_send![info, objectForKey: key_bounds];
+                if bounds.is_null() { continue; }
+                let x_obj: *mut Object = msg_send![bounds, objectForKey: key_x];
+                let w_obj: *mut Object = msg_send![bounds, objectForKey: key_w];
+                if x_obj.is_null() || w_obj.is_null() { continue; }
+                let win_x: f64 = msg_send![x_obj, doubleValue];
+                let win_w: f64 = msg_send![w_obj, doubleValue];
+                if win_w < 5.0 { continue; }
+                // Nur Fenster links vom Dots-Icon berücksichtigen
+                if win_x < right_x {
+                    left_x = left_x.min(win_x);
                 }
             }
-        };
+            let _: () = msg_send![arr, release];
+        }
 
         if left_x >= right_x {
-            eprintln!(
-                "[Barlo] overlay_bounds: left({}) >= right({})",
-                left_x, right_x
-            );
+            eprintln!("[Barlo] overlay_bounds: keine Icons links vom Dots");
             return None;
         }
 
@@ -278,11 +302,7 @@ mod macos {
 
         eprintln!(
             "[Barlo] bounds: left={:.0} right={:.0} y={:.0} h={:.0} width={:.0}",
-            left_x,
-            right_x,
-            y,
-            mb_h,
-            right_x - left_x
+            left_x, right_x, y, mb_h, right_x - left_x
         );
         Some((left_x, right_x, y, mb_h))
     }
@@ -676,34 +696,7 @@ mod macos {
         }
     }
 
-    // ── Anker-NSStatusItem ─────────────────────────────────────────────────
-
-    pub fn create_anchor_status_item() {
-        unsafe {
-            let status_bar: *mut Object = msg_send![class!(NSStatusBar), systemStatusBar];
-            let item: *mut Object = msg_send![status_bar, statusItemWithLength: 8.0f64];
-            if item.is_null() {
-                return;
-            }
-            let button: *mut Object = msg_send![item, button];
-            // U+2502 BOX DRAWINGS LIGHT VERTICAL = "│" als visueller Trenner
-            let title: *mut Object = msg_send![class!(NSString),
-                stringWithUTF8String: b"\xe2\x94\x82\0".as_ptr() as *const i8];
-            let _: () = msg_send![button, setTitle: title];
-            let _: () = msg_send![button, setBordered: objc::runtime::NO];
-            // Kleiner Font damit "|" schlanker wirkt
-            let font: *mut Object = msg_send![class!(NSFont),
-                systemFontOfSize: 10.0f64];
-            if !font.is_null() {
-                let _: () = msg_send![button, setFont: font];
-            }
-            let _: () = msg_send![item, retain];
-            ANCHOR_ITEM_PTR.store(item as usize, Ordering::SeqCst);
-            eprintln!("[Barlo] Anchor-Item erstellt");
-        }
-    }
-
-    // ── Button-Titel-Feedback ──────────────────────────────────────────────
+// ── Button-Titel-Feedback ──────────────────────────────────────────────
 
     fn update_dots_title(hidden: bool) {
         unsafe {
@@ -712,27 +705,15 @@ mod macos {
             if dots_ptr != 0 {
                 let item = dots_ptr as *mut Object;
                 let button: *mut Object = msg_send![item, button];
-                // ⋯ = \xe2\x8b\xaf, │ = \xe2\x94\x82
+                // ⋯ = \xe2\x8b\xaf, ⟨ = \xe2\x9f\xa8
                 let bytes: &[u8] = if hidden {
-                    b"\xe2\x94\x82\0"
+                    b"\xe2\x9f\xa8\0"
                 } else {
                     b"\xe2\x8b\xaf\0"
                 };
                 let title: *mut Object = msg_send![class!(NSString),
                     stringWithUTF8String: bytes.as_ptr() as *const i8];
                 let _: () = msg_send![button, setTitle: title];
-            }
-            // Anker: ausblenden wenn Icons versteckt, einblenden wenn sichtbar
-            let anchor_ptr = ANCHOR_ITEM_PTR.load(Ordering::SeqCst);
-            if anchor_ptr != 0 {
-                let anchor = anchor_ptr as *mut Object;
-                let anchor_button: *mut Object = msg_send![anchor, button];
-                let hidden_val = if hidden {
-                    objc::runtime::YES
-                } else {
-                    objc::runtime::NO
-                };
-                let _: () = msg_send![anchor_button, setHidden: hidden_val];
             }
         }
     }
@@ -982,7 +963,6 @@ pub fn run() {
                 // Screen Recording Permission beim Start anfordern
                 macos::request_screen_recording();
                 macos::create_dots_status_item();
-                macos::create_anchor_status_item();
                 macos::setup_wallpaper_observer();
                 // Overlay wird lazy beim ersten Klick erstellt
             }
