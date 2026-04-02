@@ -1,11 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
-    Emitter, Manager,
-};
+use tauri::{Emitter, Manager};
 
 // ── Global state ───────────────────────────────────────────────────────────────
 static ICONS_HIDDEN: AtomicBool = AtomicBool::new(false);
@@ -795,15 +791,11 @@ mod macos {
                         if !ICONS_HIDDEN.load(Ordering::SeqCst) {
                             return;
                         }
-                        unsafe {
-                            show_overlay();
-                        }
+                        show_overlay();
                     }
                     extern "C" fn restore_overlay(_this: &Object, _cmd: Sel) {
                         if ICONS_HIDDEN.load(Ordering::SeqCst) {
-                            unsafe {
-                                show_overlay();
-                            }
+                            show_overlay();
                         }
                     }
                     decl.add_method(sel!(timerTick), timer_tick as extern "C" fn(&Object, Sel));
@@ -829,12 +821,48 @@ mod macos {
             if !CLASS_REGISTERED.swap(true, Ordering::SeqCst) {
                 if let Some(mut decl) = ClassDecl::new("BarloDotsTarget", class!(NSObject)) {
                     extern "C" fn dots_clicked(_this: &Object, _cmd: Sel, _sender: *mut Object) {
-                        eprintln!("[Barlo] dots_clicked!");
-                        toggle_icon_hiding();
+                        unsafe {
+                            // Rechtsklick (buttonNumber == 1) → Menü zeigen
+                            let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+                            let event: *mut Object = msg_send![app, currentEvent];
+                            let btn_num: i32 = if event.is_null() { 0 } else { msg_send![event, buttonNumber] };
+                            if btn_num == 1 {
+                                let item_ptr = DOTS_ITEM_PTR.load(Ordering::SeqCst);
+                                if item_ptr == 0 { return; }
+                                let item = item_ptr as *mut Object;
+                                let menu = build_dots_menu();
+                                let _: () = msg_send![item, popUpStatusItemMenu: menu];
+                                let _: () = msg_send![menu, release];
+                            } else {
+                                eprintln!("[Barlo] dots_clicked!");
+                                toggle_icon_hiding();
+                            }
+                        }
+                    }
+                    extern "C" fn open_settings(_this: &Object, _cmd: Sel, _sender: *mut Object) {
+                        if let Some(h) = APP_HANDLE.get() {
+                            if let Some(w) = h.get_webview_window("settings") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    }
+                    extern "C" fn quit_app(_this: &Object, _cmd: Sel, _sender: *mut Object) {
+                        if let Some(h) = APP_HANDLE.get() {
+                            h.exit(0);
+                        }
                     }
                     decl.add_method(
                         sel!(dotsClicked:),
                         dots_clicked as extern "C" fn(&Object, Sel, *mut Object),
+                    );
+                    decl.add_method(
+                        sel!(openSettings:),
+                        open_settings as extern "C" fn(&Object, Sel, *mut Object),
+                    );
+                    decl.add_method(
+                        sel!(quitApp:),
+                        quit_app as extern "C" fn(&Object, Sel, *mut Object),
                     );
                     decl.register();
                 }
@@ -848,6 +876,9 @@ mod macos {
             let title: *mut Object = msg_send![class!(NSString),
                 stringWithUTF8String: b"\xe2\x8b\xaf\0".as_ptr() as *const i8];
             let _: () = msg_send![button, setTitle: title];
+            // NSEventMaskLeftMouseUp = 1<<2 = 4, NSEventMaskRightMouseUp = 1<<4 = 16
+            let mask: u64 = (1 << 2) | (1 << 4);
+            let _: () = msg_send![button, sendActionOn: mask];
             let handler: *mut Object = msg_send![class!(BarloDotsTarget), new];
             let _: () = msg_send![button, setTarget: handler];
             let _: () = msg_send![button, setAction: sel!(dotsClicked:)];
@@ -857,6 +888,46 @@ mod macos {
             DOTS_HANDLER_PTR.store(handler as usize, Ordering::SeqCst);
             eprintln!("[Barlo] Dots-Item erstellt");
         }
+    }
+
+    unsafe fn build_dots_menu() -> *mut Object {
+        let handler_ptr = DOTS_HANDLER_PTR.load(Ordering::SeqCst);
+        let handler = handler_ptr as *mut Object;
+        let empty_key: *mut Object = msg_send![class!(NSString),
+            stringWithUTF8String: b"\0".as_ptr() as *const i8];
+
+        let menu: *mut Object = msg_send![class!(NSMenu), new];
+        let _: () = msg_send![menu, setAutoenablesItems: objc::runtime::NO];
+
+        // "Barlo Settings..."
+        let settings_title: *mut Object = msg_send![class!(NSString),
+            stringWithUTF8String: b"Barlo Settings...\0".as_ptr() as *const i8];
+        let settings_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
+        let settings_item: *mut Object = msg_send![settings_item,
+            initWithTitle: settings_title
+            action: sel!(openSettings:)
+            keyEquivalent: empty_key
+        ];
+        let _: () = msg_send![settings_item, setTarget: handler];
+        let _: () = msg_send![menu, addItem: settings_item];
+
+        // Separator
+        let sep: *mut Object = msg_send![class!(NSMenuItem), separatorItem];
+        let _: () = msg_send![menu, addItem: sep];
+
+        // "Quit Barlo"
+        let quit_title: *mut Object = msg_send![class!(NSString),
+            stringWithUTF8String: b"Quit Barlo\0".as_ptr() as *const i8];
+        let quit_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
+        let quit_item: *mut Object = msg_send![quit_item,
+            initWithTitle: quit_title
+            action: sel!(quitApp:)
+            keyEquivalent: empty_key
+        ];
+        let _: () = msg_send![quit_item, setTarget: handler];
+        let _: () = msg_send![menu, addItem: quit_item];
+
+        menu
     }
 
     // ── Hidden status item enumeration ────────────────────────────────────
@@ -955,6 +1026,14 @@ fn toggle_icon_hiding_cmd() {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "settings" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             APP_HANDLE.set(app.handle().clone()).ok();
             #[cfg(target_os = "macos")]
@@ -966,31 +1045,6 @@ pub fn run() {
                 macos::setup_wallpaper_observer();
                 // Overlay wird lazy beim ersten Klick erstellt
             }
-
-            let settings_item =
-                MenuItem::with_id(app, "settings", "Barlo Settings...", true, None::<&str>)?;
-            let separator = PredefinedMenuItem::separator(app)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit Barlo", true, None::<&str>)?;
-            let menu = Menu::with_items(
-                app,
-                &[&settings_item, &separator, &quit_item],
-            )?;
-
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .icon_as_template(true)
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => app.exit(0),
-                    "settings" => {
-                        if let Some(w) = app.get_webview_window("settings") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    _ => {}
-                })
-                .build(app)?;
 
             Ok(())
         })
